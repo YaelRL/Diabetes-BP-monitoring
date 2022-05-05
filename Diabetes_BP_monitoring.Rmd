@@ -1,0 +1,1160 @@
+---
+title: 'Biostatistics D: Final project'
+Author: "Yael Rosen Lang, ID 035801901"
+output:
+  rmdformats::readthedown
+---
+```{r setup, include=FALSE, results='asis', message=FALSE, warning=FALSE}
+library(rmdformats)
+library(knitr)
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE, results='asis')
+library(ggplot2)
+library(summarytools)
+library(dplyr)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(r2glmm)
+library(performance) 
+library(interactions)
+library(sjPlot)
+library(pander)
+library(flextable)
+library(huxtable)
+panderOptions("table.split.cells", Inf)
+library("readxl")
+data=read_excel(path='F:/My Documents/MPH/Biostatistics D/Final project/bio_d_test_use_this_data.xlsx', sheet="data", na=c("-99", "NA"))
+#deleting non-relevant variables
+data <- data[-c(8, 11:12,21:24, 32:46)]
+```
+# Introduction  
+This study's goal is to test the effect of blood pressure monitoring on blood pressure and blood glucose levels in diabetes patients. Data was collected using a home-use glucometer and blood pressure monitoring system and a mobile platform, 6 months before and 6 months after the beginning of blood pressure monitoring. The study sample consisted of 170 subjects in the blood pressure monitoring group (BP) and 134 subjects in the control group.
+
+# 1. Data preparation
+The data set consisted of 2,613 observations from 304 subjects. It was imported from excel to R (R Core Team (2020). R: A language and environment for statistical computing. R
+  Foundation for Statistical Computing, Vienna, Austria. URL https://www.R-project.org/.)
+  
+**Categorical Variables:**
+Diabetes types were defined as type 1, type 2, pre-diabetes (including subjects who reported no diabetes status) and other (gestational, exocrine-pancreas diseases and other). Pre-diabetes was set as the reference group.
+Insulin treatment was defined as yes (by pump or pen) or none.
+Smoking status was defined as never, no (including occasional smokers) and yes.
+Ethnicity's 20 categories were re-coded to 5 categories (white, black, latino, asian and other).
+
+**Continuous variables: **
+Outliers were eliminated by replacing their value with "missing data" for monthly average blood glucose levels (> 295 mg/dL), monthly average pulse (<43 beats per minute), monthly average systolic blood pressure (>170 mm Hg) and Body Mass Index (BMI) (>55). The distributions of these variables with the cut-off for outliers are presented below.
+
+```{r fig.height = 3, fig.width = 8}
+bg<-ggplot(data, aes(x=bg_avg))+geom_histogram(binwidth=5)+
+  xlab("Blood glucose level")+geom_vline(xintercept = 295)
+  #ggtitle("Blood glucose level")
+
+pulse<-ggplot(data, aes(x=avg_bp_pulse))+geom_histogram(binwidth = 2)+
+  xlab("Pulse rate")+geom_vline(xintercept = 43)
+  #ggtitle("Pulse rate")
+
+bp<-ggplot(data, aes(x=avg_bp_sys))+geom_histogram(binwidth=2)+
+  xlab("Systolic blood pressure")+geom_vline(xintercept = 170)
+  #ggtitle("Systolic blood pressure")
+
+bmi<-ggplot(data, aes(x=bmi))+geom_histogram(binwidth=2)+
+  xlab("BMI")+geom_vline(xintercept = 55)
+  #ggtitle("Body Mass Index (BMI)")
+
+library(gridExtra)
+grid.arrange(bg, pulse, ncol=2)
+grid.arrange(bp, bmi, ncol=2)
+
+```
+
+9 observations out of 2,562 valid entries were eliminated for blood glucose levels, 3 out of 991 observations were eliminated for pulse rate and 9 out of 991 were eliminated for systolic blood pressure. A single observation of BMI (BMI=58) was eliminated.
+Observations with missing data for monthly blood glucose average were omitted.
+
+After data cleaning, the data set consisted of 2,554 observations for a total of 303 subjects: 169 in the BP monitoring group and 134 in the control group.
+The control group had 943 observations vs. 1,611 observations in the BP monitoring group. 
+Mixed effects models will be used for statistical analysis, as they are the preferred method for analysis of longitudinal and hierarchical data, and they are also recommended with unbalanced or missing data.
+
+**Missing data:** variables with more than 30% of missing data were not used in the analysis unless requested, as will be shown in section 3. 
+
+```{r }
+#eliminating outliers
+data$bp_number_events[data$bp_number_events>300]<-NA
+data$bg_avg[data$bg_avg>295]<-NA
+data$bg_avg[data$bg_avg<75]<-NA
+data$avg_bp_sys[data$avg_bp_sys>170]<-NA
+data$avg_bp_pulse[data$avg_bp_pulse<43]<-NA
+data$bmi[data$bmi>55]<-NA
+data<-data%>% filter(!is.na(data$bg_avg))
+
+#renaming
+names(data)[names(data)=='time_centered_bp']<-'time_c'
+data$group[data$group=="no BP"]<-"Control"
+names(data)[names(data)=='median_household_income_city_est']<-'income'
+
+#re-leveling (unifying similar/too-small categories)
+data$gender[data$gender=="female"]<-"Female"
+data$gender[data$gender=="male"]<-"Male"
+data$gender<-as.factor(data$gender)
+
+data$diabetes_type[is.na(data$diabetes_type)]<-0
+data$diabetes_type[data$diabetes_type=="gestational"]<-"Other"
+data$diabetes_type[data$diabetes_type=="diseases-exocrine-pancreas"]= "Other"
+data$diabetes_type[data$diabetes_type=="none"]= "Pre-diabetes"
+data$diabetes_type[data$diabetes_type=="pre-diabetes"]= "Pre-diabetes"
+data$diabetes_type[data$diabetes_type=="not_sure"]= "other"
+data$diabetes_type[data$diabetes_type=="type1"]= "Type 1"
+data$diabetes_type[data$diabetes_type=="type2"]= "Type 2"
+data$diabetes_type<-factor(data$diabetes_type, levels=c("Pre-diabetes", "Type 2", "Type 1", "Other"))
+
+data$insulin_treatment[data$insulin_treatment=="0"]= "No"
+data$insulin_treatment[data$insulin_treatment=="no"]= "No"
+data$insulin_treatment[data$insulin_treatment=="pump"]="Yes"
+data$insulin_treatment[data$insulin_treatment=="pen"]= "Yes"
+data$insulin_treatment<-factor(data$insulin_treatment, levels=c("No", "Yes"))
+
+data$smoke[data$smoke=="no"]= "No"
+data$smoke[data$smoke=="ocassionaly"]= "No"
+data$smoke[data$smoke=="never"]="Never" 
+data$smoke[data$smoke=="yes"]="Yes" 
+data$smoke<-factor(data$smoke, levels=c("Never", "No", "Yes"))
+
+#ethnicity: white, latino, black, asian, other (40% missing, mostly white)
+data$ethnicity[data$ethnicity=="white"]= "White"
+data$ethnicity[data$ethnicity=="other, white"]= "White"
+data$ethnicity[data$ethnicity=="white, hawaiian"]= "White"
+data$ethnicity[data$ethnicity=="white, indian"]= "White"
+data$ethnicity[data$ethnicity=="white, other"]= "White"
+data$ethnicity[data$ethnicity=="other, white"]= "White"
+data$ethnicity[data$ethnicity=="black"]= "Black"
+data$ethnicity[data$ethnicity=="black, indian"]= "Black"
+data$ethnicity[data$ethnicity=="latino"]= "Latino"
+data$ethnicity[data$ethnicity=="latino, hawaiian"]= "Latino"
+data$ethnicity[data$ethnicity=="latino, white, indian"]= "Latino"
+data$ethnicity[data$ethnicity=="asian, hawaiian"]= "Asian"
+data$ethnicity[data$ethnicity=="asian"]= "Asian"
+data$ethnicity[data$ethnicity=="asian, white"]= "Asian"
+data$ethnicity[data$ethnicity=="asian, hawaiian"]= "Asian"
+data$ethnicity[data$ethnicity=="other"]= "Other"
+data$ethnicity[data$ethnicity=="hawaiian, middleEastern"]= "Other"
+data$ethnicity[data$ethnicity=="indian"]= "Other"
+data$ethnicity[data$ethnicity=="indian, hawaiian"]= "Other"
+data$ethnicity[data$ethnicity=="middleEastern"]= "Other"
+data$ethnicity<-factor(data$ethnicity, levels=c("White", "Black", "Latino", "Asian", "Other"))
+
+#adding variables
+#data$after<-ifelse(data$time_c<0, 0,1)
+#data$after<-as.factor(data$after)
+data$time_from_diagnosis<-2021-data$diagnosed_since
+#formatting categorical variables
+data$hypertension<-factor(data$hypertension, levels=c(0,1), labels=c("No", "Yes"))
+data$depression<-factor(data$depression, levels=c(0,1), labels=c("No", "Yes"))
+data$group<-as.factor(data$group)
+data$high_blood_lypids<-factor(data$high_blood_lypids, levels=c(0,1), labels=c("No", "Yes"))
+data$kidney_disease<-factor(data$kidney_disease, levels=c(0,1), labels=c("No", "Yes"))
+data$none_comorb<-factor(data$none_comorb, levels=c(0,1), labels=c("No", "Yes"))
+data$cardiovascular<-factor(data$cardiovascular, levels=c(0,1), labels=c("No", "Yes"))
+data$sleep_disorder<-factor(data$sleep_disorder, levels=c(0,1), labels=c("No", "Yes"))
+data$cancer<-factor(data$cancer, levels=c(0,1), labels=c("No", "Yes"))
+data$family_genetics<-factor(data$family_genetics, levels=c("no","yes"), labels=c("No", "Yes"))
+data$time_from_diagnosis<-2021-data$diagnosed_since
+
+#adding baseline variables for each subject
+#selecting the first row by id group, and obtaining baseline bg
+df<-data[!duplicated(data$id),]%>%select(id, bg_avg)
+#aggregating and dding bg_avg_events for each subject
+bg_events<-tapply(data$bg_number_events, data$id, mean, na.rm=TRUE)
+df<-cbind(df, bg_events)
+data<-merge(data, df, by=c("id"))
+#deleting x suffix
+#making sure the data is sorted
+data<-data[with(data, order(id, time_c)),]
+data<-data %>% rename(bg_avg=bg_avg.x, bg_baseline= bg_avg.y)
+data$bg_delta<-data$bg_avg - data$bg_baseline
+```
+
+# 2. Centered time 
+Blood glucose and blood pressure measurements were averaged for each month. The monthly average timing was centered, so the first month of BP monitoring was set to zero. All subsequent monthly averages' timings ranged 1 to 6, and the monthly averages' timings before BP monitoring began ranged -1 to -6.  
+
+```{r }
+#summary statistics of centered time data
+df1<-data.frame(val = unclass(summary(data$time_c[data$group=="BP"])))%>%round(digits=2)
+df2<-data.frame(val = unclass(summary(data$time_c[data$group=="Control"])))%>%round(digits=2)
+df3<-data.frame(val = unclass(summary(data$time_c)))%>%round(digits=2)
+df<-cbind(df1, df2, df3)
+knitr::kable(df, col.names=c("BP", "Control", "Total"), align = "l", caption="Centered time by group" )
+
+#histogram
+ggplot(data, aes(x=time_c))+geom_histogram(binwidth = 1)+facet_grid(.~group)+xlab("Centered time (months) by group")
+```
+The control group has no observations for time=0 for miscellaneous data entering reason.   
+The BP monitoring group has more observations in total, and significantly more so in the period of time before the beginning of BP monitoring (time=0). The larger sample size might make it easier to obtain statistically significant results for the BP monitoring group in any analysis that will compare both groups.
+
+# 3. Sample description
+The BP monitoring group and the control group were compared across several socio-demographic and clinical parameters. Differences were tested using T test and Chi-squared test or Fisher's test. The results are presented in the table below:
+
+## Socio-demographic and clinical characteristics
+```{r }
+library(table1)
+library(Hmisc)
+t1<-data[!duplicated(data$id),]
+t1$total_time<-tapply(data$time_c, data$id, max)-tapply(data$time_c, data$id, min)
+label(t1$total_time)<-"Participation time"
+
+#defining a function to compute p-value
+pvalue <- function(x, ...) {
+  # Construct vectors of data y, and groups (strata) g
+  y <- unlist(x)
+  g <- factor(rep(1:length(x), times=sapply(x, length)))
+  if (is.numeric(y)) {
+    # For numeric variables, perform a standard 2-sample t-test
+    p <- t.test(y ~ g)$p.value
+  } else {
+    # For categorical variables, perform a chi-squared test of independence
+    p <- chisq.test(table(y, g))$p.value
+  }
+  # Format the p-value, using an HTML entity for the less-than sign.
+  # The initial empty string places the output on the line below the variable label.
+  c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))
+}
+
+#labeling
+label(t1$age)<-"Age"
+label(t1$gender)<-"Gender"
+label(t1$diabetes_type)<-"Diabetes type"
+label(t1$bmi)<-"Body Mass Index (BMI)"
+label(t1$insulin_treatment)<-"Insulin treatment"
+label(t1$hypertension)<-"Hypertension"
+label(t1$depression)<-"Depression"
+label(t1$smoke)<-"Smoking"
+label(t1$alcohol_consumption)<-"Alcohol consumption"
+label(t1$ethnicity)<-"Ethnicity"
+label(t1$none_comorb)<-"Comorbidities"
+label(t1$time_from_diagnosis)<-"Time from diagnosis(years)"
+label(t1$activity_level)<-"Activity level"
+label(t1$stress_level)<-"Stress level"
+label(t1$income)<-"Median household income"
+label(t1$bg_baseline)<- "Baseline Blood glucose level (mg/dL)"
+label(t1$kidney_disease)<- "Kidney disease"
+  label(t1$high_blood_lypids)<-"Hyperlipidemia"
+  label(t1$cardiovascular)<-"Cardiovascular disease"
+  label(t1$sleep_disorder)<-"Sleep disorders"
+  label(t1$cancer)<-"Cancer"
+  label(t1$family_genetics)<-"Family history"
+  
+  #TABLE1: socio-demographic and clinical  parameters
+table1(~ gender + age + ethnicity +diabetes_type +insulin_treatment +bmi +none_comorb+ hypertension+ kidney_disease+ high_blood_lypids+ cardiovascular+ sleep_disorder+  depression + cancer+ smoke +alcohol_consumption + activity_level + family_genetics+
+         stress_level+ income+ time_from_diagnosis+ bg_baseline+ total_time 
+       | group, data=t1, #caption= "Socio-demographic and clinical characteristics",
+       overall=F, extra.col=list(`P-value`=pvalue))
+
+```
+
+## Missing data
+The following variables were not used in the analysis due to a high percentage of missing data (>30%) and a significant difference in missing data rates between the monitoring and the control group: ethnicity, family genetics, smoking status, alcohol consumption, activity level, stress level and median household income.
+All other parameters had less then 3.5% missing data.
+
+There appears to be a pattern of approximately 60% missing data in the control group and a 30% missing data in the intervention group in several lifestyle and demographic parameters. This leads us to doubt other self-reported parameters such as specific comorbidities (sleep disorders, depression, kidney disease, etc.), that have a 100% response rate, probably due to the data entering method (missing data entered as "No"). The lower prevalence of comorbidities and sleep disorders in the control group might be a result of a poor response rate. These parameters will not be used in the analysis, including hyperlipidemia, kidney disease, cardiovascular disease, sleep disorders, depression and cancer. hypertension differences as well should be considered with caution.
+
+## Key findings
+A statistically significant difference in mean or proportion was found for the following parameters:  
+**Age**: the average age was higher in the BP monitoring group (65 years (SD 9.61)) compared to the control group (59 years (SD 12.3)), with a p-value<0.001.   
+**Comorbidities, Hypertension, sleep disorders**: The BP monitoring group had a higher proportion of positive responses relative to the control group. As stated earlier, this data might be untrustworthy due to information bias.  
+**Participation time**: the mean participation time for subjects in the BP monitoring group was 8.75 months (SD 3.070) and 7.08 months (SD 1.87) in the control group. The difference was statistically significant (p-value<0.001). 
+
+The difference in gender proportions between the control and BP monitoring groups is not statistically significant (p-value= 0.056), but should be considered. It should also be noted that the proportion of males is higher than the females (1:2 in the BP monitoring group, 1:1.3 in the control group). Insulin sensitivity and some aspects of glucose homeostasis are regulated differently in males and females, and gender could be a relevant factor. 
+
+## Conclusions and practical implications
+Age is a confounder that will be addressed in statistical analysis to prevent bias. Some subject characteristics should be used with caution and avoided if possible. 
+
+The BP group's sample size is larger than the control group's (169 vs. 134 subjects, 1,611 vs. 943 observations). 
+The subjects in the BP monitoring group contributed longer time duration relative to the control group (average of 8.75 months vs. 7.08 months respectively). Under these conditions it might be easier to detect a statistically significant trend in the BP monitoring group, compared to the control group. In addition, a longer monitoring period might strengthen medical surveillance bias in the BP monitoring group.
+
+All in all, for most socio-demographic and clinical features the BP monitoring group and the control group seem to be similar. Possible confounders and biases were identified and will be addressed in the analysis.
+
+# 4. Distribution of blood glucose levels over time, by group
+The basic distribution of blood glucose levels over time by group reveals a possible small negative trend in the BP monitoring group, and none in the control group.
+
+```{r }
+ggplot(data, aes(x=time_c, y=bg_avg))+geom_jitter()+facet_grid(.~group)+
+  geom_vline(xintercept = 0)+
+  ggtitle("Distribution of blood glucose over time, by group")+
+  xlab("Time(months), 0 is the starting point of BP monitoring")+
+  ylab("Monthly average bloog glucose (mg/dL)" )
+
+ggplot(subset(data, data$bg_avg>0), aes(x=time_c, y=bg_avg, color=group))+
+  geom_smooth(method = 'loess',span =2, na.rm=TRUE)+
+  geom_vline(xintercept = 0)+
+  ggtitle("Blood glucose over time by group")+
+  xlab("Time (months), 0 is the starting point of BP monitoring")+
+  ylab("Monthly average blood glucose (mg/dL)")
+
+```
+
+In the control group, monthly average blood glucose levels decrease, increase and return to baseline, with a wide confidence interval (shaded grey). The confidence interval is bigger than the BP monitoring's confidence interval, especially before the beginning of BP monitoring. This is probably due to the smaller sample size.  
+In the BP monitoring group we can see a trend of decrease in blood glucose over time. The confidence intervals for the BP monitoring group and the control group overlap, so no conclusions can be drawn. A statistical test needs to be performed to determine the significance of the correlation between blood glucose and time in the BP and control groups, taking into account the nested structure and confounders.  
+
+Next, we will examine how monthly average blood glucose changed over time in both groups.
+
+```{r }
+ggplot(subset(data, !is.na(data$bg_delta)), aes(x=time_c, y=bg_delta, color=group))+
+  geom_smooth(method = 'loess', na.rm=TRUE)+ geom_vline(xintercept = 0)+
+  ggtitle("Blood glucose changes over time by group")+
+  xlab("Time (months), 0 is the starting point of BP measurement")+
+  ylab("Changes in monthly average blood glucose level")
+
+```
+
+Before the beginning of BP monitoring (left side of the vertical line), both groups show a decrease in blood glucose. The confidence intervals overlap, so no conclusion can be made in regard to a difference between the groups. The control group's smaller sample size resulted in a wider confidence interval.  
+After the beginning of BP monitoring (right side of the vertical line), the control group's blood glucose seem to stabilize or slightly increase while the BP monitoring group shows a further decrease. Here the confidence intervals are partly separated, so this might indicate a true difference between the groups. A statistical test will be needed to test these trends and differences between the groups.  
+It should be noted that the decline in blood glucose level is small, around 8 mg/dL after 6 months.
+
+# 5. Group differences in time-related blood glucose fluctuations before and after starting BP monitoring
+Linear mixed models were applied to investigate group differences in blood glucose trends before and after BP monitoring.  
+Blood glucose changes were defined as monthly average blood glucose minus blood glucose baseline (the subject's 1st recorded measurement of blood glucose).
+
+## Group differences before BP monitoring  
+Our data set for this analysis consisted of 812 observations of 260 subjects, 619 observations of the BP monitoring group and 193 of the control group.  
+
+First, we will examine 3 possible options for grouping our longitudinal data in the mixed model: by subject, by group, and a 2-level model with subject nested in group. We will use null models with these groupings and compare ICC values. The Intra-Class Correlation coefficient (ICC) measures how strongly observations in the same group resemble each other, and It can guide us in the decision on how to group our data. Icc ranges between 0 and 1 and the higher the ICC, the better the grouping variable explains the variance of the outcome.
+
+```{r }
+beforedf<-data%>% filter(time_c<0)
+#null model-id
+m_id <- lmer(bg_delta~ (1 |id) ,data=beforedf, REML = T)
+m_group <- lmer(bg_delta~ (1 |group) ,data=beforedf, REML = T)
+m_id_group<-lmer(bg_delta~ (1 |group/id) ,data=beforedf, REML = T)
+tab_model(m_id, m_group, m_id_group, show.ci = FALSE, show.re.var= FALSE, show.r2=TRUE, show.icc=TRUE, 
+          title="Blood glucose changes: grouping by subject id, by group, and by subject and group",
+          dv.labels=c("Grouping by subject", "Grouping by group", "Grouping by subject and group"))
+##dv.labels = "BG change from baseline")
+```
+
+The ICC for grouping by subject is 0.35, which means that 35% of the variance of the blood glucose changes is explained by the subject grouping. Grouping by group (control/BP) yields an ICC of 1%, and the 2-level model of grouping with both subject and group is not better than the grouping by subject alone. We will therefore use a mixed effects model with grouping by subject.     
+To determine the effect of group on BG changes over time, an interaction between time and group was entered in the model. Two models were tested: one with interaction alone and a random intercept, and another with age added as a confounder. The models' assumptions were met.
+
+```{r }
+m0<-lmer(bg_delta~ time_c*group +(1|id) ,data=beforedf, REML = T)
+m1 <- lmer(bg_delta~ time_c*group +age+(1|id) ,data=beforedf, REML = T)
+tab_model(m0, m1, show.re.var= FALSE, show.ci = FALSE, show.r2=TRUE, show.icc=TRUE,
+          pred.labels =c("(Intercept)", "Time", "Group", "Time:Group", "Age"),
+          title= "Group differences in BG changes, before BP monitoring",
+          dv.labels="Blood glucose change from baseline")
+
+```
+
+The interaction between group and time was non-significant in both models (p-value=0.34), so we can conclude that the changes in blood glucose over time were similar for the BP monitoring group and control group.
+
+## Group differences after BP monitoring  
+This analysis was based on a data set of 1,742 observations: 922 observations of the BP monitoring group and 750 of the control group.    
+We will test the 3 grouping options for testing BG changes after the beginning of BP monitoring by comparing null models' ICC as in the previous section.
+
+```{r }
+afterdf<-data%>% filter(time_c>-1)
+m_id <- lmer(bg_delta~ (1 |id) ,data=afterdf, REML = T)
+m_group <- lmer(bg_delta~ (1 |group) ,data=afterdf, REML = T)
+m_id_group<-lmer(bg_delta~ (1 |group/id) ,data=afterdf, REML = T)
+tab_model(m_id, m_group, m_id_group, show.ci = FALSE, show.re.var= TRUE, 
+          title= "Blood glucose changes: grouping by subject id, by group, and by subject and group",
+          dv.labels=c("Grouping by subject", "Grouping by group", "Grouping by subject and group"))
+```
+
+The ICC for grouping by subject is 0.70, which means that 70% of the variance of the blood glucose changes is explained by the subject grouping. Grouping by group (control/BP) yields an ICC of 1.4%, and in this case as well the 2-level model of grouping with both subject and group is not better than the grouping by subject alone. We will therefore use a mixed effects model with grouping by subject, with time as a random slope to account for time-related blood glucose changes per subject.  
+To test if there were differences in blood glucose changes between the groups we will use a mixed model with subject grouping, group as a moderator of the correlation between blood glucose changes and time, age as a confounder, a random intercept and time as a random slope. The model's assumptions were met.
+
+```{r }
+m1 <- lmer(bg_delta~ time_c*group +age+(1+time_c |id) ,data=afterdf, REML = T)
+tab_model(m1, show.re.var= FALSE, show.ci = FALSE, show.r2 = TRUE,
+          pred.labels =c("(Intercept)", "Time", "Group", "Age", "Time:Group"),
+         title= "Group differences in BG changes, after BP monitoring",
+          dv.labels="Blood glucose change from baseline")
+
+```
+
+The interaction between time and group is statistically significant (p-value=0.03), which means there was a difference in blood glucose changes between the intervention group and the control group after the beginning of BP monitoring.  
+
+Next, we will add more effects to the model, so we can analyze this interaction and learn more about the differences between the groups.  
+**Blood glucose variability (BG STD)** is a cardinal measure of glycemic control and a potential predictor of blood glucose changes.  The **number of blood glucose measurements per month** could be indicative of behavior and responsiveness to the intervention.
+These 2 possible predictors were added to the model to improve prediction of blood glucose changes.  
+To test the effect of group on blood glucose changes over time we used a mixed model with subject grouping. An interaction between time and group was entered to the model, age and gender were also entered as confounders. Time was entered as a random slope, along with a random intercept. The model's assumptions were met.
+
+```{r}
+m2 <- lmer(bg_delta~ time_c*group +bg_std+bg_number_events+age+gender+
+           +(1+time_c|id) ,data=afterdf, REML = T)
+tab_model(m2, show.re.var= FALSE, show.ci = FALSE, show.r2 = TRUE,
+          pred.labels =c("(Intercept)", "Time", "Group", "BG STD", "BG measurements per month", "Age", "Gender", "Time:Group"),
+          title= "Group differences in BG changes, after BP monitoring",
+          dv.labels="Blood glucose change from baseline")
+```
+
+The interaction between group and time was statistically significant (p-value=0.02), so we can conclude that the changes in blood glucose over time were different for the BP monitoring group and control group, even after adjusting for age, gender, number of blood glucose measurements per month and blood glucose STD. 
+
+This interaction was further investigated with simple slope analysis. In simple slope analysis we conduct a regression of the outcome on the predictor at a specific value of the moderator. This way we can investigate the statistical significance and magnitude of the moderation effect at different levels of the moderator.
+In this case, our moderator is the group (BP/control), and we will test if there is a statistically significant difference between the slopes of the 2 groups.
+
+```{r}
+interact_plot(m2, pred=time_c, modx=group, interval = TRUE, x.label ="Time (months)", 
+              y.label = "Blood glucose change from baseline (mg/dL)",
+              main.title ="Group differences in BG changes over time", 
+              legend.main = "Group",
+              title="Group differences in BG by time", data=afterdf)
+ss<-sim_slopes(m2, pred=time_c, modx=group)
+as_huxtable(ss)
+```
+
+For the control group, the slope coefficient is 0.50 (SE=0.41), and it is not statistically significant (p-value=0.23).   
+For the BP monitoring group, the slope coefficient is -0.76 (SE=0.36), and it is statistically significant (p-value=0.04). This means that for the BP monitoring group, blood glucose levels decreased over time, with a slope of -0.76, while the control group had no statistically significant change in blood glucose over time. We can conclude that there was a significant difference in blood glucose changes over time after the beginning of BP monitoring.
+
+## Conclusions
+Before the beginning of BP monitoring there was no statistically significant difference between the control group and BP monitoring group. After the intervention began, the BP monitoring group had a statistically significant decrease in blood glucose over time while the control group had no significant change.
+
+# 6).Did blood pressue change over time as a result of BP monitoring?
+This question is hard to answer. Causality can be verified in a controlled trial, but in this case it is difficult to match a suitable control to BP monitoring. Medical surveillance bias is inherent in this intervention, and it is a part of its hypothesized effect. 
+We can, however, look for dose-response relationships between BP measures and level of engagement or participation in the intervention. This is also problematic, as participants who were less engaged might have different socio-demographic and clinical characteristics than participants who were compliant. We can analyze the differences and check if such dose-response relationship does exist.
+First, we will check if there was a statistically significant change in blood pressure during the BP monitoring period..
+
+```{r}
+bpdata<-subset(data, group=="BP")%>%filter(time_c>-1 & !is.na(avg_bp_sys))
+bpdf<-bpdata
+bpdf<-bpdf[!duplicated(bpdf$id),]%>%select(id, avg_bp_sys)
+bp_events<-tapply(bpdata$bp_number_events, bpdata$id, mean, na.rm=TRUE)
+total_time<-tapply(bpdata$time_c, bpdata$id, max)-tapply(bpdata$time_c, bpdata$id, min)
+bpdf<-cbind(bpdf, bp_events, total_time)
+bpdata<-merge(bpdata, bpdf, by=c("id"))
+bpdata<-bpdata[with(bpdata, order(id, time_c)),]
+bpdata<-bpdata %>% rename(avg_bp_sys=avg_bp_sys.x, bp_baseline= avg_bp_sys.y)
+bpdata$bp_delta<-bpdata$avg_bp_sys - bpdata$bp_baseline
+bpdata$Engagement<-ifelse(bpdata$bp_events<30,0,1)
+bpdata$Engagement<-factor(bpdata$Engagement, levels=c(0,1), labels=c("Low", "High"))
+bpdata$Hypertension<-ifelse(bpdata$avg_bp_sys>130,1,0)
+bpdata$Hypertension<-factor(bpdata$Hypertension, levels=c(0,1), labels=c("No", "Yes"))
+
+```
+
+## Did BP change over time?
+Blood pressure data was available for the BP monitoring group only, of course. One subject in this group had no BP measurements at all, and was excluded. The data-set for this analysis consisted of 941 observations from 168 subjects.
+
+**Systolic blood pressure** was chosen as the outcome variable, due to its clinical relevance as the most significant predictor of morbidity and mortality among BP measures. It also has greater variability, which would facilitate detection of correlations and trends. 
+A mixed model was used to test if systolic blood pressure changed over time. A null model was tested to see if the subject grouping is relevant for BP changes. ICC was 0.41, so this grouping was chosen again. Time was added as a predictor to the model, age and gender as confounders and a random intercept. The model's assumptions were met.
+
+```{r }
+m1<-lmer(bp_delta~time_c+ age+gender+(1|id), data=bpdata, REML=T)
+tab_model(m1, show.re.var= FALSE, show.r2 = TRUE,
+          pred.labels =c("(Intercept)", "Time", "Age", "Gender"),
+          title= "BP changes over time",
+          dv.labels="BP change from baseline")
+```
+
+This model shows that time is significantly correlated to BP changes, with an estimated coefficient of -0.97 (p value<0.001). This means that the monthly average systolic blood pressure decreased over time in the BP monitoring group by 0.96 mm Hg per month. Clinically, this is a negligible effect.  
+When viewing individual trends of BP over time, we can see a pretty wide range, of which -0.97 is the average.
+
+```{r}
+ggplot(bpdata, aes(y=bp_delta, x=time_c, group=id)) +  
+  geom_point(size = 1.2, alpha = .8, position = "jitter")+
+  theme_minimal()+  geom_smooth(method = lm, se= FALSE, size = .5, alpha  = .8)+
+  xlab("Time (months)")+ ylab("BP changes from baseline (mmHg)")
+```
+
+Further analysis is needed to identify sub-group trends, or in other words: for which participants was this effect most pronounced?  
+when comparing blood pressure changes between observations with abnormal monthly average systolic blood pressure (>130 mm Hg) and normal systolic blood pressure, we can see that for abnormal BP, blood pressure was maintained and did not increase further. For normal BP, blood pressure decreased and there seems to be a difference between the groups.
+
+```{r }
+ggplot(subset(bpdata, bpdata$time_c>0) , aes(x = time_c, y = bp_delta, color=Hypertension))+
+  geom_point(size = 1.2, alpha = .8, position = "jitter")+
+  theme_minimal()+  geom_smooth(method = lm, se= FALSE, size = .5, alpha  = .8)+
+  ggtitle("BP changes over time, by hypertension")+
+  xlab("Time (months)")+
+  ylab("Blood pressure change from baseline (mmHg)")
+```
+
+This correlation was tested with a linear mixed model with subject grouping, adding hypertension as a moderator to the correlation between BP changes and time, age as a confounder and a random intercept. The model's assumptions were met.
+
+```{r }
+m1<-lmer(bp_delta~time_c*Hypertension+ age+(1|id), data=bpdata, REML=T)
+tab_model(m1, show.re.var= FALSE, show.r2 = TRUE,
+          pred.labels =c("(Intercept)", "Time", "Hypertension", "Age", "Time:Hypertension"),
+          title= "BP changes over time, by hypertension",
+          dv.labels = "BP change from baseline")
+```
+
+The interaction between time and hypertension is statistically significant (p-value=0.002). This means that cases of abnormal blood pressure changed differently over time compared to those with normal blood pressure. This could be a clinically relevant finding, and we will investigate this interaction with simple slope analysis.  
+By simple slope analysis we can investigate the statistical significance and magnitude of the moderation effect at different levels of the moderator. Our moderator is hypertension (yes/no), and we will compare the slopes for these 2 groups.
+
+```{r }
+interact_plot(m1, pred=time_c, modx=Hypertension, interval = TRUE, x.label ="Time (months)", 
+              y.label = "BP change from baseline (mmHg)",
+              main.title ="BP changes over time by hypertension", 
+              legend.main = "Hypertension",
+              title="Group diffrerences in BP by time", data=bpdata)
+ss<-sim_slopes(m1, pred=time_c, modx=Hypertension)
+as_huxtable(ss)
+```
+
+Both normal and abnormal blood pressure cases had a decrease in blood pressure over time which was statistically significant (p-value<0.001 for both groups), with normal cases having a greater reduction compared to abnormal cases (-1.02 (SE=0.15)  and -0.4 (SE=0.13), respectively).  
+We can summarize and say that BP did decrease over time, and cases of normal blood pressure had a greater decrease relative to abnormal blood pressure.
+
+## Did BP monitoring cause the decrease in blood pressure?
+Our metric for assessment of the BP monitoring intervention is the monthly number of BP measurements. It can be hypothesized that participants who measured and recorded their blood pressure more often had a better blood pressure control. In order to assess the correlation between BP monitoring and blood pressure changes, we defined a variable for BP monitoring engagement.  
+The total average of BP measurements per month was calculated for each participant. The median for monthly BP measurements was 28 measurement per month. High engagement was defined as average BP measurements per month greater than 30 (more than one measurement per day), and the rest were defined as low engagement.   T-tests and Chi-squared tests were used to compare the high and low engagement groups across all socio-demographic and clinical parameters as assessed in section 3 and no statistically significant difference was found, except for age. This means that engagement level groups can be compared without concern for additional potential confounders. 
+
+```{r }
+ggplot(subset(bpdata, bpdata$bp_delta!=0),aes(x = time_c, y = bp_delta, color=Engagement))+
+  geom_point(size = 1.2, alpha = .8, position = "jitter")+
+  theme_minimal()+  geom_smooth(method = loess, se= FALSE, size = .5, alpha  = .8)+
+  ggtitle("BP changes over time, by engagement level")+
+  xlab("Time(months)")+
+  ylab("BP change from baseline (mm Hg)")
+
+```
+
+We can see that the high engagement group had a slightly bigger decrease in BP relative to the low engagement group. To check if the difference is statistically significant this correlation was tested with a linear mixed model, adding engagement as a moderator to the correlation between BP changes and time. In light of our recent finding that hypertension is a significant moderator in the correlation between time and BP changes, a second model was tested, with a 3-way interaction between time, hypertension and engagement, age as a confounder and a random intercept. The models' assumptions were met.
+
+```{r }
+m1<-lmer(bp_delta~time_c*Engagement+age+(1|id), data=bpdata, REML=T)
+tab_model(m1,show.re.var= FALSE, show.r2 = TRUE, show.ci=FALSE,
+          pred.labels =c("(Intercept)", "Time", "Engagement", "Age","Time:Engagement"),
+          dv.labels= "BP change from baseline",
+          title="BP changes over time, by engagement")
+```
+
+In the first model, the interaction of time and engagement is not statistically significant (p-value=0.14), so engagement level alone is not a significant moderator for BP changes over time.  
+In the second model, hypertension was added to the interaction of time and engagement.
+
+```{r}
+m2<-lmer(bp_delta~time_c*Engagement*Hypertension+ age+(1|id), data=bpdata, REML=T)
+tab_model(m2, show.re.var= FALSE, show.r2 = TRUE, show.ci=FALSE,
+          pred.labels =c("(Intercept)", "Time", "Engagement", "Hypertension", "Age", "Time:Engagement", "Time:Hypertension", "Engagement:Hypertension", "Time:Engagement:Hypertension" ),
+          dv.labels= "BP change from baseline",
+          title= "BP changes over time, by hypertension and engagement")
+```
+
+When adding hypertension to the interaction, it is statistically significant (p value=0.039).  
+We will apply simple slope analysis to investigate the 3-way interaction and learn about the effect of engagement on BP changes. We now have 2 moderators: Engagement (high/low) and hypertension (yes/no).
+
+```{r }
+interact_plot(m2, pred=time_c, modx=Engagement, mod2=Hypertension, interval = TRUE, x.label ="Time (months)", 
+              y.label = "BP change from baseline (mmHg)",
+              main.title = "BP changes over time by hypertension and engagement",
+              legend.main = "Engagement",
+              data=bpdata)
+
+ss<-sim_slopes(m2, pred=time_c, modx=Engagement, mod2=Hypertension)
+
+Estimate<-c(-1.16, -0.83)
+SE<-c(0.2, 0.22)
+t<-c(-5.83, -3.71)
+p_value<-c("0.00", "0.00")
+Engagement<-c("Low", "High")
+No<-cbind(Engagement, Estimate, SE, t, p_value)
+knitr::kable(No,caption="BP changes for Normal blood pressure")
+
+Estimate<-c(-0.19, -0.71)
+SE<-c(0.17, 0.21)
+t<-c(-1.07, -3.38)
+p_value<-c("0.28", "0.00")
+Engagement<-c("Low", "High")
+Yes<-cbind(Engagement, Estimate, SE, t, p_value)
+knitr::kable(Yes,caption="BP changes for abnormal blood pressure")
+```
+
+For normal blood pressure, the decrease in BP was statistically significant for both levels of engagement (p<0.001), with a slightly bigger decrease for the low engagement group (estimated slope:-1.16 (SE=0.2) vs. -0.83 (SE=0.22)).
+
+For participants with abnormal blood pressure with low engagement there was no statistically significant change in BP over time (estimated slope= -0.19, p-value=0.28).
+For participants with abnormal blood pressure with high engagement there was a statistically significant decrease in BP (p value<0.001), with a slope of -0.71 (SE=0.21).
+
+## Conclusions and analysis limitations
+We can conclude that BP monitoring is significantly correlated to BP decrease over time, depending on the level of engagement and hypertension. The clinically relevant conclusion is that hypertensive patients who monitored BP at least once a day are the ones who benefited from a stabilized or slightly decrease blood pressure, relative to hypertensive patients who monitored BP less often.
+
+So was blood pressure decreased because of BP monitoring? when comparing high and low engagement groups
+we can see a dose-response effect to the intervention which might imply causation. The low and high engagement groups were tested for differences in socio-demographic and clinical characteristics and no statistically significant difference was found (except for age, that was entered as a confounder to the analysis).
+On the other hand, engagement level and BP changes are both affected by personal and behavioral characteristics which cannot be controlled for in the given data set. These characteristics could also be associated with age. Further research is needed to determine causation.
+
+# 7). The association between Blood pressure and blood glucose
+The connection between diabetes and hypertension is multi-faceted. In this section we will test the association between measurements of blood glucose and blood pressure. First, we looked at the correlations and distributions of the available variables for blood glucose and blood pressure to identify primary correlations, while ignoring the nested structure. The variables that were tested were monthly averages of systolic BP, diastolic BP, pulse, BP changes from baseline, blood glucose, BG standard deviation and BG changes from baseline.
+Correlations were tested with Pearson' correlation tests and scatter plots were generated to view possible trends.
+
+```{r}
+library(psych)
+pairs.panels(bpdata[,c(27:29, 76, 31:32, 72)], 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE, # show correlation ellipses
+             stars=TRUE)
+```
+
+Some correlations were identified between blood glucose and BP measures.   
+**Monthly average of blood glucose (BG)** had a significant correlation with systolic BP with a Pearson's correlation (r) of 0.21, and diastolic BP with r=0.18. It was also significantly correlated to pulse (r=0.12) and BP change from baseline (r=0.11). 
+**Monthly standard deviation of blood glucose (BG STD)** also had a significant correlation to systolic BP (r=0.11), diastolic BP (r=0.09) and monthly average pulse (r=0.13). Another significant correlation was BP changes (r=0.09).  
+**Monthly change from baseline in blood glucose (BG changes)** was significantly correlated to BP changes (r=0.1)
+
+These correlations were tested with mixed models with subject grouping, various confounders, predictors and a random intercept. 
+
+## To cut a long story short
+The table below summarizes our findings, with the regression coefficients derived from correlation testing. Statistically significant estimates (p-value<0.05) are in bold. A detailed account of the analysis follows.
+```{r}
+Variables<-c("Blood glucose", "Blood glucose STD", "Blood glucose changes")
+sys<-c("**0.17**", "**0.12**", "" )
+dis<-c("**0.23**", "**0.14**", "" )
+pulse<-c("0.07", "0.02", "")
+bpc<-c("0.12", "**0.10**", "0.07")
+res<-data.frame(cbind(Variables, sys, dis, pulse, bpc))
+knitr::kable(res, col.names = c("Variables", "Systolic BP", "Diastolic BP", "Pulse", "BP changes"), caption="Correlation estimates for BG and BP meaures")
+
+```
+
+## Blood glucose and BP measurements
+### Systolic BP
+We will test the association between blood glucose and systolic BP with a mixed model, using subject as the grouping variable, and adding diabetes type, gender and age as confounders and a random intercept. The model's assumptions were met.
+```{r }
+
+m1<-lmer(bg_avg ~ avg_bp_sys+diabetes_type+gender+age+(1|id), data=bpdata, REML=T)
+tab_model(m1, show.re.var= FALSE, show.r2 = TRUE,
+          pred.labels =c("(Intercept)", "Average systolic BP", "DM other", "DM type 2", "DM type 1", "Gender", "Age"),
+          title= "Blood glucose by systolic BP",
+          dv.labels="Blood glucose")
+```
+
+Our model's results show that systolic BP is significantly correlated to blood glucose (p value=0.012), with each unit of increase in BP correlated to a 0.17 increase in blood glucose. clinically, this is an insignificant effect. A 20 units increase in BP will results in a mere 3.4 units increase in BG, which is a negligible effect.
+
+### Diastolic BP
+The same model was tested for diastolic BP, with similar results. This model's assumptions were met as well.
+
+```{r }
+m2<-lmer(bg_avg ~ avg_bp_dis+diabetes_type+gender+age+(1|id), data=bpdata, REML=T)
+tab_model(m2,show.re.var= FALSE, show.r2 = TRUE,
+          pred.labels =c("(Intercept)", "Average diastolic BP", "DM other", "DM type 2", "DM type 1", "Gender", "Age"),
+          title= "Blood glucose by diastolic BP",
+          dv.labels="Blood glucose")
+```
+
+Diastolic BP is similarly significantly correlated to Blood glucose (p value=0.017), with an estimate of 0.23. Each unit of increase in BP correlated to a 0.23 increase in blood glucose. A 20 units increase in diastolic BP will results in a mere 4.6 units increase in BG. Clinically, this is also a negligible effect.
+
+### Pulse
+We will test the association of pulse and blood glucose with a mixed model, using subject as the grouping variable and a random intercept. Another model was tested, with added predictor diabetes type and gender and age as confounders. The models' assumptions were met.
+
+```{r }
+m1<-lmer(bg_avg ~ avg_bp_pulse+(1|id), data=bpdata, REML=T)
+m2<-lmer(bg_avg ~ avg_bp_pulse+diabetes_type+gender+age+(1|id), data=bpdata, REML=T)
+tab_model(m1, m2, show.re.var= FALSE, show.r2 = TRUE, show.ci=FALSE,
+          pred.labels =c("(Intercept)", "Average pulse", "DM other", "DM type 2", "DM type 1", "Gender", "Age"),
+          title= "Blood glucose by pulse",
+          dv.labels="Blood glucose")
+```
+
+Our 2 models' results show that pulse is not significantly correlated to blood glucose (p-value=0.2, p-value=0.50). Several other models with other predictor were tested with the same result. We can conclude that no correlation was found between monthly average blood glucose and monthly average pulse after consideration of the nested structure.
+
+### BP changes
+We will test the association between blood glucose and BP changes with 2 mixed models, using subject as the grouping variable, and adding diabetes type, gender and age as confounders and a random intercept. 
+The first model tested Bp changes as a predictor of blood glucose with age as a confounder.
+A second model with diabetes type and gender added as additional confounders was tested as well.
+The models' assumptions were met.
+
+```{r}
+m1<-lmer(bg_avg ~ bp_delta +age+(1|id), data=bpdata, REML=T)
+#summary(m1)
+m2<-lmer(bg_avg ~ bp_delta+gender+age+diabetes_type+ (1|id), data=bpdata, REML=T)
+#summary(m2)
+tab_model(m1, m2, show.re.var= FALSE, show.r2 = TRUE, show.ci=FALSE,
+          pred.labels =c("(Intercept)", "BP changes","Gender", "Age", "DM type 2", "DM type 1", "DM other"),
+          title= "Blood glucose by BP changes",
+          dv.labels="Blood glucose")
+```
+
+In both models, the correlation between blood glucose and BP changes is not statistically significant (p-value=0.08, 0.09). 
+
+### Conclusions
+Systolic and diastolic BP were significantly correlated to monthly average blood glucose, with a small effect (0.17 and 0.24 respectively). No statistically significant correlation was found between blood glucose and pulse or BP changes.
+
+## Blood glucose STD and BP measures
+### systolic BP
+The correlation between BG STD and systolic BP was tested with a mixed model with subject grouping, with possible confounders age, gender and diabetes type and a random intercept. The model's assumption were met.
+
+```{r}
+m1<-lmer(bg_std ~ avg_bp_sys+diabetes_type+gender+age+(1|id), data=bpdata, REML=T)
+tab_model(m1, show.re.var= FALSE, show.r2 = TRUE,
+          pred.labels =c("(Intercept)", "Systolic BP", "DM type 2", "DM type 1", "DM other", "Gender", "Age"),
+          title= "Blood glucose STD by systolic BP",
+          dv.labels="Blood glucose STD")
+```
+
+Systolic BP was significantly correlated to BG STD (p-value=0.01), with an estimate of 0.12, even after adjusting for confounders age, gender and diabetes type. This means that every 1 mm Hg increase in monthly average of systolic blood pressure is correlated to a 0.12 mg/dL increase in monthly standard deviation of blood glucose.
+
+### Diastolic BP
+The same test was performed for Diastolic blood pressure.
+
+```{r}
+m1<-lmer(bg_std ~ avg_bp_dis+diabetes_type+gender+age+(1|id), data=bpdata, REML=T)
+tab_model(m1, show.re.var= FALSE, show.r2 = TRUE,
+          pred.labels =c("(Intercept)", "Average diastolic BP", "DM type 2", "DM type 1", "DM other", "Gender", "Age"),
+          title= "Blood glucose STD by diastolic BP",
+          dv.labels="Blood glucose STD")
+```
+
+Monthly average of diastolic blood pressure was significantly correlated to blood glucose variability (p-value=0.03), with an estimate of 0.14, even after adjusting for confounders age, gender and diabetes type. This means that every 1 mm Hg increase in monthly average of diastolic blood pressure is correlated to a 0.14 mg/dL increase in monthly standard deviation of blood glucose.
+
+### Pulse
+We will test the association of pulse and BG STD with a mixed model, using subject as the grouping variable and a random intercept. Another model was tested, with added predictor diabetes type and gender and age as confounders. The models' assumptions were met.
+
+```{r }
+m1<-lmer(bg_std ~ avg_bp_pulse+(1|id), data=bpdata, REML=T)
+m2<-lmer(bg_std ~ avg_bp_pulse+diabetes_type+gender+age+(1|id), data=bpdata, REML=T)
+tab_model(m1, m2, show.re.var= FALSE, show.r2 = TRUE, show.ci=FALSE,
+          pred.labels =c("(Intercept)", "Average pulse", "DM other", "DM type 2", "DM type 1", "Gender", "Age"),
+          title= "BG STD by pulse",
+          dv.labels = "Blood glucose STD")
+```
+
+Our 2 models' results show that pulse is not significantly correlated to BG STD (p-value=0.34, p-value=0.84). Several other models with other predictor were tested with the same result. We can conclude that no correlation was found between monthly average blood glucose and monthly average pulse after consideration of the nested structure.
+
+### BP changes
+We will test this association with a mixed model, using subject as the grouping variable, and adding diabetes type, gender and age as confounders and a random intercept. 
+The model's assumptions were met.
+```{r}
+m2<-lmer(bg_std~ bp_delta +gender+age+diabetes_type+ (1|id), data=bpdata, REML=T)
+#summary(m2)
+tab_model(m2, show.re.var= FALSE, show.r2 = TRUE, show.ci=FALSE,
+          pred.labels =c("(Intercept)", "BP changes","Gender", "Age", "DM type 2", "DM type 1", "DM other"),
+          title= "BG STD by BP changes",
+          dv.labels="Blood glucose STD")
+```
+
+Our model's results show that BP changes are significantly correlated to blood glucose STD (p-value=0.03), even after adjusting for confounders gender, age and diabetes type. The estimate is 0.1, which means that every 1 mm Hg increase in BP relative to baseline is correlated to a 0.1 increase in blood glucose STD.
+
+### Conclusions
+Higher systolic and diastolic blood pressure are significantly correlated to a greater blood glucose variability, which is an indicator of poor glycemic control. The parameters' estimates are small, 0.12 (p-value=0.01) and 0.14 (p-value=0.03). A clinically significant change in glycemic variability is considered as an increase of at least 10 mg/dL, and such a change will translate to a 83 mm Hg increase in systolic BP or 71 mm Hg increase in diastolic blood pressure. BP changes were also significantly correlated to BG, with an estimate of 0.1 (p-value=0.03).
+
+
+## BG changes and BP changes
+We will test this association with a mixed model, using subject as the grouping variable, adding time as a predictor and diabetes type, gender and age as confounders and a random intercept. 
+The model's assumptions were met.
+
+```{r}
+#m1<-lmer(bg_delta ~ bp_delta+time_c + (1|id), data=bpdata, REML=T)
+m2<-lmer(bg_delta ~ bp_delta+time_c+gender+age+diabetes_type+ (1|id), data=bpdata, REML=T)
+#summary(m2)
+tab_model(m2, show.re.var= FALSE, show.r2 = TRUE, show.ci=FALSE,
+          pred.labels =c("(Intercept)", "BP changes","Time", "Gender", "Age", "DM type 2", "DM type 1", "DM other"),
+          title= "BG changes by BP changes",
+          dv.labels="BG changes")
+```
+
+Our model's results show that the correlation between BP changes and BG changes is not statistically significant (p-value=0.34).
+
+## Final conclusions
+In summary, significant correlations were found between monthly average blood glucose and monthly average systolic and diastolic blood pressure (parameter estimates 0.17 and 0.23 respectively).
+Similar correlations were found between monthly blood glucose standard deviation and systolic and diastolic blood pressure (parameter estimates 0.12 and 0.14 respectively). Another correlation was found between BP changes and BG STD (parameter estimate 0.1).
+Other correlations were not found.
+
+# 8). Mediation model: Stress level-> Blood pressure -> Blood glucose
+A mediation model was used to test if blood pressure is a mediator in the correlation between stress level and blood glucose.
+
+The data set for this analysis was the same as for section 6 and 7. Outliers for average blood glucose (higher than 250 mg/dL) were eliminated (2 observations out of 941).
+
+```{r fig.height = 3, fig.width = 5 }
+mdata<-bpdata
+
+ggplot(mdata, aes(x=bg_avg))+geom_histogram(binwidth=3)+
+  geom_vline(xintercept = 250)+xlab("Monthly average blood glucose")+
+  ggtitle("Distribution of blood glucose in the BP monitoring group")
+
+mdata$bg_avg[mdata$bg_avg>250]<-NA
+mdata$stress_level[mdata$stress_level==10]<-9
+mdata<-mdata%>%filter(!is.na(mdata$stress_level)&
+                        !is.na(mdata$avg_bp_sys)&!is.na(mdata$avg_bp_dis)&!is.na(mdata$bg_avg))
+```
+
+Observations with missing data for stress level, systolic blood pressure or glucose measurements were omitted. 
+stress levels 9 and 10 contained a small amount of observations (12 and 15 respectively) and were unified.
+The analysis was performed on 672 observations from 118 subjects.
+
+There are 3 stages to testing the mediation model:  
+1. direct model: can blood glucose be predicted by stress level?  
+2. Can blood pressure be predicted by stress level?  
+3. when predicting blood glucose by stress level and blood pressure, is stress level still significant?
+
+## 1. direct model: stress level-> blood glucose
+looking at the scatter plot of stress level vs. monthly average blood glucose there seems to be a quadratic relationship between these variables.
+
+```{r fig.height = 4, fig.width = 6}
+
+#########################-----1. model direct: STRESS >> BG
+ggplot(mdata, aes(x=stress_level, y=bg_avg))+
+  geom_point(size = 1.2, alpha = .8, position = "jitter")+
+  stat_smooth(method = "lm", formula = y ~ I((x-5)^2), size = 1)+
+ ggtitle("Blood glucose by stress level")+
+  xlab("Stress level (0-9 scale)")+
+  ylab("Monthly average blood glucose (mg/dL)")
+```
+
+To test stress level as a predictor of blood glucose we will fit a mixed model with subject grouping. A quadratic formula consisting of stress level centered to its median (5) and squared- (Stress level-5)^2^ - was entered to the model, along with time, diabetes type, confounders gender and age, a random intercept and time as a random slope. The model's assumptions were met.
+
+```{r }
+m_d<-lmer(bg_avg ~ time_c+ I((stress_level-5)^2)+diabetes_type+gender+age+insulin_treatment+
+            (1+time_c|id), data = mdata, REML = T,
+          na.action = na.exclude)
+
+tab_model(m_d, show.re.var= FALSE, 
+                  pred.labels =c("(Intercept)", "Time(months)", "Stress level", "Diabetes, Type 1", "Pre-diabetes", "Diabetes, Other" , "Gender", "Age", "Insulin treatment"),
+                  title= "Effect of stress level on blood glucose",
+                  dv.labels="Blood glucose")
+```
+
+Our model's results show that stress level is statistically significant as a predictor of average monthly blood glucose, while adjusting for diabetes type, gender, age and time. The effect of stress level is -0.6 (p-value=0.048). This means that stress level can predict monthly average blood glucose directly. Stress has a negative effect on blood glucose- as stress level increases, blood glucose decreases. 
+
+## 2. Stress level-> blood pressure
+To test stress level as a predictor of systolic blood pressure we used a mixed model with subject grouping, fixed effects time, stress level and monthly average diastolic blood pressure, age as a confounder and a random intercept. The model's assumptions were met.
+
+```{r }
+#########################-----2. model a: STRESS >> BP
+m1<-lmer(avg_bp_sys~time_c+ stress_level+age+avg_bp_dis+(1|id), data = mdata,REML = T, na.action = na.exclude)
+tab_model(m1, show.re.var= FALSE, 
+                  pred.labels =c("(Intercept)", "Time (months)","Stress level", "Age", "Diastolic BP"),
+                  title= "Effect of stress level on systolic blood pressure",
+                  dv.labels="Systolic blood pressure")
+
+
+```
+
+Stress level is statistically significant as a predictor of monthly average systolic blood pressure, while adjusting for age, diastolic BP and time. The effect of stress level is -0.55 (p-value=0.03). This means that stress level has a negative effect on blood pressure as well- as stress level increases, blood pressure decreases. 
+
+## 3.  Stress level + blood pressure -> blood glucose  
+In our final model we will test blood glucose by predictors stress level and blood pressure.  
+To this end we will use a mixed model, with subject grouping, time, stress level, systolic blood pressure, age as a confounder and a random intercept. The model's assumptions were met.
+
+```{r }
+################-------------3. model b: BG~ Stress + BP
+#testing the Y~M+X, bg_delta~bp_delta+stress_level 
+m1<-lmer(bg_avg ~ time_c+avg_bp_sys+stress_level+age+(1|id), data = mdata, REML = T,
+     na.action = na.exclude)
+tab_model(m1, show.re.var= FALSE, 
+                  pred.labels =c("(Intercept)", "Time(months)", "Blood Pressure", "Stress level", "Age"),
+                  dv.labels= "Blood glucose by stress level and BP")
+
+
+```
+
+When predicting blood glucose with both stress level and blood pressure, stress level is not significant (p-value=0.9) while blood pressure is significant (p-value=0.03) with a coefficient of 0.18. This implies that the effect of stress level on blood glucose was fully mediated by blood pressure.   
+
+Blood pressure has a positive effect on blood glucose (coefficient=0.18, p-value=0.03) and stress level has a negative effect on blood pressure (coefficient= -0.55, p-value=0.048).  
+The **indirect effect - ab** is equation $a*b = (-0.55)*0.18= -0.1$.   
+The **direct effect - c'**, is the effect of stress level on blood glucose. In section 1 we found that the estimate for this effect is -0.59 (p-value=0.048).  
+
+To determine if the indirect effect is statistically significant We will need to compute its confidence interval. This can be achieved with causal mediation analysis.
+
+## Causal mediation analysis
+To test the significance of this mediation model our null hypothesis is that ab, the indirect effect, equals zero. Our alternative hypothesis is that ab is different from zero.
+To test this hypothesis we will estimate the indirect effect ab and its confidence interval by using bootstrapping. This method draws a sample with replacement from the population, calculates a, b and ab and repeats the process 1,000 times. A distribution of ab is generated, from which we can derive an estimate for ab and its 95% confidence interval.  
+The same procedure was performed for c', the direct effect.
+
+```{r warning=FALSE }
+Estimate<-c(-0.09, -0.25)
+CI_Lower<-c(-0.19, -0.92)
+CI_Upper<-c(0.003, 0.37)
+#p_value<-c("0.06", "0.00")
+Effect<-c("ACME", "ADE")
+Type<-c("Indirect (ab)", "Direct (c')")
+med<-cbind(Effect, Type, Estimate, CI_Lower, CI_Upper)
+knitr::kable(med, col.names=c("Effect", "Type", "Estimate","CI lower bound", "CI upper bound"), caption="Bootstrapped estimates and 95% confidence interval for mediation model")
+
+```
+
+**ACME- Average Causal Mediation Effects** is the indirect effect of stress level on blood glucose, mediated by blood pressure. The bootstrapped unstandardized indirect effect was -0.089, and the 95% confidence interval ranged from -0.19 to 0.003. We should note that the bootstrapped estimate of -0.09 is fairly close to our calculated indirect effect of -0.1.  
+The confidence interval includes 0, so p-value>0.05 and we must conclude that we cannot reject the null hypothesis and the indirect effect equals zero.
+
+**ADE- Average Direct Effect** is the direct effect of stress level on blood glucose. The bootstrapped unstandardized direct effect was -0.25, and the 95% confidence interval ranged from -0.92 to 0.37. In this case as well the confidence interval includes 0, and the indirect effect was not statistically significant.
+
+To summarize, after testing the direct and indirect effect of stress level on blood glucose with blood pressure as a mediator in casual mediation analysis with 95% confidence interval bootstrapping for mediation estimates and confidence interval, a mediation effect was not found. 
+
+## Moderation of the association Stress level-> BP
+The association between stress level and systolic blood pressure was tested with possible moderators time, gender, age, hypertension, past/present smoking, depression and comorbidities.
+All these variables were entered as an interaction with stress level in mixed models with systolic blood pressure as the dependent variable and a variety of other predictors, and the interaction's statistical significance was tested.  
+The only variable that had a significant interaction with stress level in its correlation with BP was time.
+
+To test time as a moderator of the association of stress level and BP we used a mixed model with grouping by subject, an interaction between time and stress level, age as a confounder and a random intercept. The model's assumptions were met.
+
+```{r }
+m2<-lmer(avg_bp_sys~ time_c*stress_level+
+           age+(1|id), data = mdata,REML = T, na.action = na.exclude)
+tab_model(m2, show.re.var= FALSE, 
+                  pred.labels =c("(Intercept)", "Time(months)", "Stress level", "Age", "Time: Stress level"),
+                  dv.labels= "BP by stress level, moderated by time")
+```
+
+The interaction between stress level and time was statistically significant (p-value=0.005), and the effect of the interaction on the outcome, systolic blood pressure, is -0.15. We can conclude that stress level is a predictor of systolic blood pressure, with the moderator time while controlling for age.  
+
+We will analyze the interaction of stress level and time by using simple slope analysis. Although our moderator is time, it would be more intuitive and clinically relevant to look at stress level as the moderator in BP changes over time. Stress level has 10 levels (0 to 9) and we will test the slope for each level.   
+Johnson-Neyman method was used to determine at which value range does stress level serve as a statistically significant moderator for systolic blood pressure over time.
+
+```{r }
+#interaction analysis
+interact_plot(m2, pred=time_c, modx=stress_level, modx.values = c(0:9), interval = FALSE, 
+              x.label="Time (months)",
+              y.label = "Systolic blood pressure (mmHg)",
+              main.title ="Blood pressure over time by stress level", 
+              legend.main = "Stress level (0-9 scale)",
+              title="Blood pressure over time by stress level", 
+              data=mdata)
+
+ss<-sim_slopes(m2, pred=time_c, modx=stress_level, modx.values = c(0:9), modx.labels = "Stress level")
+library(huxtable)
+as_huxtable(ss)
+
+```
+
+In the table we can see that except for stress levels 0 and 1, all slopes are statistically significant. 
+From the interaction plot and the table it is evident that there is a negative linear correlation between stress level and slope: the higher the stress level, the greater decrease in systolic blood pressure over time.
+
+Johnson-Neyman method was used to determine at which value range does stress level serve as a statistically significant moderator of systolic blood pressure over time, if we would like to consider stress level as a continuous variable (when using stress level averages, etc.).  
+
+```{r}
+
+johnson_neyman(m2, pred=time_c, modx=stress_level, title="Johnson-Neyman plot")
+```
+
+The Johnson-Neyman method yielded supporting results: there is a monotonic decrease in the slope of systolic BP over time as the stress level increases. That means that participants who reported a higher stress level had a greater decrease in blood pressure over time. the stress level range within which stress level is a  statistically significant moderator is (1.59, 9).   
+
+To summarize, time is a statistically significant moderator of the correlation between stress level and BP changes. For stress levels 2-9, the higher the stress level, the greater the decrease in systolic BP over time.
+
+# 9). Prediction model for peak blood glucose
+A model was developed for predicting peak blood glucose (>180 mg/dL). This is a clinically relevant threshold. Our outcome variable is a binary variable (0= monthly average blood glucose is lower than 180, 1= blood glucose equals 180 or higher), so we will use a logistic regression model. Since our data is nested, we will test a null model grouped by subject to determine if a mixed model is indicated.
+
+```{r }
+pdata<-data
+pdata$bg_180<-ifelse(pdata$bg_avg>179, 1,0)
+pdata$bg_180<-as.factor(pdata$bg_180)
+pdata$ageS<-pdata$age/10
+pdata$bg_number_eventsS<-pdata$bg_number_events/30
+
+m0<-glmer(bg_180~ (1|id), data=pdata, family=binomial, 
+          control = glmerControl(optimizer = "bobyqa"),  nAGQ = 10)
+tab_model(m0, show.re.var= FALSE, show.icc=TRUE, show.r2 = TRUE,
+                  title= "Peak blood glucose, grouped by subject",
+          dv.labels="Peak blood glucose")
+```
+
+The ICC equals 0.74 and it is fairly close to 1. We can conclude that the subject grouping variable will be appropriate for prediction of the outcome variable. We will use a mixed effects logistic regression model, with subject grouping.
+
+## Predictors
+The model was based on 2,554 observations from 303 subjects. Exploratory data analysis suggested the following variables as possible predictors for blood glucose peaks: blood glucose baseline, monthly BG measurements, age, insulin treatment and gender.
+
+```{r fig.height = 4, fig.width = 6  }
+ggplot(pdata, aes(y=bg_baseline, fill=bg_180)) +  geom_boxplot()+
+  ylab("Baseline average blood glucose (mg/dL)" )+
+  scale_fill_discrete(name = "Peak BG", labels = c("No", "Yes"))+
+  ggtitle("Distribution of baseline blood glucose, by peak BG")
+```
+
+As can be seen in the box-plot above, a cut-off of 150 for **baseline blood glucose** can correctly predict 75% of cases of peak BG, and 75% of cases of non-peak BG, when ignoring the nested structure. It seems like a significant predictor.  
+
+The most important factor influencing glycemic control is patient's behavior. In section 5 we learned that **monthly BG measurements** is a statistically significant predictor of blood glucose changes, and it can be considered as a measure of the subject's compliance and health-awareness.
+
+```{r fig.height = 4, fig.width = 6}
+ggplot(pdata, aes(y=bg_number_events, fill=bg_180)) + geom_boxplot()+
+  ylab("BG measurements per month" )+
+  #labs(fill="Peak BG (Yes=1, No=0)")+
+  scale_fill_discrete(name = "Peak BG", labels = c("No", "Yes"))+
+  ggtitle("Distribution of BG measurements per month, by peak BG")
+```
+
+The box-plot shows a similar distribution for peak and non-peak BG, but the non-peak BG group has a long right tail which differentiates it from the peak BG group.
+
+Chi-squared tests were performed to test the correlation between peak BG and **insulin treatment** (p-value<.001, Chi-squared statistic=84.41), and **gender** (p-value<.001, Chi-squared statistic= 32.97), both were significantly correlated. Age was also entered to the model as a confounder.
+
+## Model Assumptions
+Before proceeding to testing our model, we will verify that our model's assumptions are met.
+
+**1). Linearity**- The model's continuous variables should have a linear relationship with the logit of the outcome variable.  
+The smoothed scatter plots show that BG baseline, age and monthly BG measurements are linearly correlated to the logit of peak blood glucose.
+
+```{r fig.height = 3, fig.width = 5 }
+mydata <- pdata
+#-----------------
+model <- glmer(bg_180 ~log(bg_baseline)+bg_number_eventsS+ageS+insulin_treatment+gender+(1|id), data=pdata, family=binomial, control = glmerControl(optimizer = "bobyqa"),  nAGQ = 10)
+#summary(model)
+#--------------------
+#model assumptions
+#Linearity
+# Predict the probability of peak glucose
+probabilities <- predict(model, type = "response")
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+predictors<-c("age", "bg_baseline", "bg_number_eventsS")
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities)))
+#Create the scatter plots:
+  ggplot(mydata, aes(logit, bg_baseline))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw()+ ylab("Baseline blood glucose (mg/dL)")
+  
+  ggplot(mydata, aes(logit, bg_number_events))+
+    geom_point(size = 0.5, alpha = 0.5) +
+    geom_smooth(method = "loess") + 
+    theme_bw()+ylab("Monthly BG measurements")
+  
+  ggplot(mydata, aes(logit, age))+
+    geom_point(size = 0.5, alpha = 0.5) +
+    geom_smooth(method = "loess") + 
+    theme_bw()+ylab("Age (years)")
+```
+
+**2). Outliers or influential values**  
+Outliers were handled as previously described. 
+An assessment of influential values was performed by using Cook's Distance method. Cook’s Distance is an estimate of the influence of a data point. It takes into account both the leverage and residual of each observation. Cook’s Distance allows us to investigate how much our model changes when a influential subject is removed from our mixed model, to make sure our model is robust.
+
+![Cook's distance plot](plot_influenceMe.jpg)  
+
+The plot above depicts Cook's distance for our model. We can see several outlier points that are distanced from the main bulk. Each point represents a subject, and the most distanced points are the most influential subjects. 
+Using a threshold of 4/n = 4/303= 0.0132 for Cook's distance, 21 subjects were identified as influential in this model. These 21 subjects were responsible for 55 out of 211 events of peak blood glucose in our data set, so removing these subjects would cost us 26% of our data on peak blood glucose. These are the subjects we want to model, so removing them would certainly hamper the model's prediction ability. Our model predicts an extreme event whose occurrence is 0.08 in our data set. It is reasonable to expect that some subjects will be more influential for the model than others. 
+
+In order to verify that the influential values are not negatively affecting the model, the 3 most influential subjects were removed from the data set, and the model was tested.  
+All predictors were still statistically significant, except for age. The model's accuracy was lower than the original model's (a complete account of this analysis appears in the appendix).
+The influential subjects did not reduce the global fit of the model and its predictive ability, vice-versa- the model that was built on the full data set performed better.
+
+**3). Multicollinearity**- our last assumption is that there are no substantial correlations between predictors. Pearson's correlation test was used to assess correlation between continuous predictors in our model.
+
+```{r }
+library(psych)
+pairs.panels(pdata[,c("bg_baseline", "bg_number_events", "age")], 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE, # show correlation ellipses
+             stars=TRUE)
+```
+
+The correlations between the variables are of negligible magnitude (0.1 and -0.11).
+Chi-squared test was applied to the categorical variables insulin treatment and gender, and they are significantly correlated (p value<0.001). 
+
+Variation inflation factor (VIF) was calculated for all predictors to detect multicollinearity. A VIF>5 is considered a cause for concern, and VIF=1 is considered optimal. All VIFs were very close to 1 (indicating no correlation), and not higher than 1.12.
+
+```{r}
+#variation inflation factor
+Variables<-c("BG baseline", "BG measurements per month", "Age", "Insulin treatment", "Gender")
+VIF<-c(1.08, 1.12, 1.01, 1.09, 1.02)
+vifdf<-data.frame(cbind(Variables, VIF))
+knitr::kable(vifdf, caption="Model variables' VIF values" )
+
+```
+
+Our model's assumptions are met, and we can proceed to model fitting. Our model was a logit mixed effects model, with subject grouping. The model's effects were blood glucose baseline, monthly BG measurements, insulin treatment, confounders age and gender and a random slope.
+The model's predictors have well-proven clinical relevance and significant correlation to the outcome, and met the model's assumptions. Baseline Blood glucose had a right asymmetric distribution, and log transformation was used to normalize the data. Age and monthly BG measurements were scaled to avoid model convergence issues.
+
+## Evaluating the model's performance
+The model's performance was tested using ROC curve (Receiver operator characteristics Curve), which is a graphical summary showing the proportion of true positives and false positives at all possible values of probability cutoff. The ROC curve will allow us to identify the optimal threshold value for classification, which is a trade-off between sensitivity and specificity.
+
+To evaluate our model, the data set was split into a training set that was used to build our model, and a test set, that was used to assess our model's predictive power. This method aids in minimizing model over-fitting. 
+
+```{r }
+library(pROC)
+library(caret)
+set.seed(123)
+training.samples <- pdata$bg_180 %>% createDataPartition(p = 0.8, list = FALSE)
+train.data  <- pdata[training.samples, ]
+test.data <- pdata[-training.samples, ]
+
+model <- glmer(bg_180 ~log(bg_baseline)+bg_number_eventsS+ageS+insulin_treatment+gender+(1|id), 
+               data=train.data, family=binomial, 
+               control = glmerControl(optimizer = "bobyqa"),  nAGQ = 10)
+
+pdata$fitted.results <- predict(model,newdata=pdata, type='response', allow.new.levels = TRUE)
+#calculating and plotting ROC and AUC
+roc_obj <- roc(pdata$bg_180, pdata$fitted.results)
+plot(roc_obj, print.thres = "best",print.auc=T)
+coords(roc_obj, "best", "threshold")
+#spe:0.91, sen: 0.929, AUC=0.966
+#checking model's accuracy on the test set
+probabilities <- model %>% predict(test.data, type = "response")
+predicted.classes <- ifelse(probabilities > 0.107, 1, 0)
+# Model accuracy
+#mean(predicted.classes == test.data$bg_180)
+#library(MLmetrics)
+#F1_Score(test.data$bg_180, predicted.classes, positive = NULL)
+```
+
+The **optimal threshold** identified by the ROC curve was 0.107.   
+**AUC**-Area Under the Curve values range between 0.5 and 1.00. AUC>0.8 is an indication of a good classifier. For our model, the AUC for the train data is 0.957 which is very good.   
+The model's **specificity** is 89.5% and **sensitivity** is 89.6%.   
+The model's **accuracy** is 88.4%.   
+**F1 or F score** is another measure of accuracy, balancing the model's sensitivity and precision. The maximum value of F1 is 1.00, representing perfect precision and sensitivity. Our model's F1 is 0.907.   
+The model succeeded in predicting peak blood glucose in the test data, which means it is not over-fitted, and its diagnostic parameters are good.
+The trade-off between sensitivity and specificity can be altered by changing the threshold for classification, depending on how much error we can tolerate in false positives or false negatives.
+
+## Interpretation of the model's coefficients
+```{r }
+#--------------------prediction model-------------------------
+model <- glmer(bg_180 ~log(bg_baseline)+bg_number_eventsS+ageS+insulin_treatment+gender+(1|id), 
+               data=pdata, family=binomial, 
+               control = glmerControl(optimizer = "bobyqa"),  nAGQ = 10)
+
+tab_model(model, show.re.var= FALSE, 
+                  pred.labels =c("(Intercept)", 
+                                 "Log(baseline blood glucose)", "Monthly BG measurements (scaled by 1/30)", "Age (scaled by 1/10)", "Insulin treatment (Yes/No)", "Gender"),
+                  title= "Prediction model for peak blood glucose",
+                  dv.labels="Peak Blood glucose")
+
+```
+
+**Baseline BG**- The interpretation of the odds ratio for baseline blood glucose is a bit challenging due to the necessary log transformation. Since OR>1 we can reasonably ascertain that a higher baseline blood glucose is predictive of a higher odd for peak blood glucose, and this correlation is statistically significant.   
+To illustrate the meaning of the Odds ratio, a 10% increase in baseline blood glucose will translate to a $9,282^{(log(1.1))}=2.39$ increased odd of peak blood glucose.  
+A 20% increase in baseline blood glucose will translate to a $9,282^{(log(1.2))}=5.27$ increased odd of peak blood glucose.  
+**Monthly BG measurements**- Every 30 additional blood glucose reports per month will result in a 45% decrease in the odd for a peak blood glucose. This finding strongly demonstrates the correlation between mobile platform engagement and glycemic control.  
+**Age**- the odd for peak blood glucose decreases by 29% for each decade of life. This finding might be related to behavioral patterns rather than physiological mechanisms.    
+**insulin treatment**- people who are treated with insulin are 4.76 times more likely to suffer peak blood glucose levels.  
+**Gender**-men are 2.27 time more likely than women to suffer peak blood glucose levels.
+
+
+```{r , echo=FALSE}
+
+```
+## Appendix: Influence analysis
+In order to test the impact of influential subjects, the 3 most influential subjects were removed from the data set (20 observations out of 2,554), and the model was tested on 2,534 observations from 300 subjects.
+
+```{r }
+infdata<-pdata%>%filter(id!="608775" & id!="488723" & id!="918415")
+model <- glmer(bg_180 ~log(bg_baseline)+bg_number_eventsS+ageS+insulin_treatment+gender+(1|id), 
+               data=infdata, family=binomial, 
+               control = glmerControl(optimizer = "bobyqa"),  nAGQ = 10)
+
+tab_model(model,  show.re.var= FALSE, 
+                  pred.labels =c("(Intercept)", 
+                                 "Log(baseline blood glucose)", "Monthly BG measurements (scaled by 1/30)", "Age (scaled by 1/10)", "Insulin treatment (Yes/No)", "Gender"),
+                  title= "Prediction model for peak blood glucose- influence evaluation",
+                  dv.labels="Peak blood glucose")
+```
+
+All predictors were still statistically significant, except for age.
+
+As before, the data was split to a training set and a test set. The model was built on the train set and tested on the test set. Prediction diagnostics were calculated using a ROC curve, and compared to the results of the model based on the full data set.
+```{r}
+
+set.seed(123)
+training.samples <- infdata$bg_180 %>% createDataPartition(p = 0.8, list = FALSE)
+train.data  <- infdata[training.samples, ]
+test.data <- infdata[-training.samples, ]
+
+model <- glmer(bg_180 ~log(bg_baseline)+bg_number_eventsS+ageS+insulin_treatment+gender+(1|id), 
+               data=train.data, family=binomial, 
+               control = glmerControl(optimizer = "bobyqa"),  nAGQ = 10)
+
+infdata$fitted.results <- predict(model,newdata=infdata, type='response', allow.new.levels = TRUE)
+#calculating and plotting ROC and AUC
+roc_obj <- roc(infdata$bg_180, infdata$fitted.results)
+plot(roc_obj, print.thres = "best",print.auc=T)
+coords(roc_obj, "best", "threshold")
+#spe:0.851, sen: 0.956, AUC=0.956
+probabilities <- model %>% predict(test.data, type = "response", allow.new.levels = TRUE)
+predicted.classes <- ifelse(probabilities > 0.06, 1, 0)
+# Model accuracy= 84.2%
+#mean(predicted.classes == test.data$bg_180)
+#
+#comparison table for the models
+
+Parameters<-c("Specificity", "Sensitivity", "Accuracy")
+Full<-c("89.5%", "89.6%", "88.4%")
+Partial<-c("85.2%", "94%", "84.2%")
+inftab<-data.frame(Parameters, Full, Partial)
+knitr::kable(inftab, caption="Prediction diagnostics for the full set model and the partial set model")
+```
+
+The model based on the full data set had higher specificity (89.5% vs. 85.2%) and lower sensitivity (89.6% vs. 94%) relative to the model without 3 most influential subjects. The overall accuracy was better in the full set model (88.4% vs. 84.2%). The differences between the models were small, so we are safe to say it is better to build the model on the full data set and include as many peak BG events as possible.
+```
